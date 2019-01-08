@@ -89,6 +89,11 @@ func (Manager) GetAllSupportedLinterConfigs() []*linter.Config {
 			WithPresets(linter.PresetStyle).
 			WithSpeed(5).
 			WithURL("https://github.com/dominikh/go-tools/tree/master/cmd/gosimple"),
+		linter.NewConfig(golinters.Megacheck{StylecheckEnabled: true}).
+			WithSSA().
+			WithPresets(linter.PresetStyle).
+			WithSpeed(5).
+			WithURL("https://github.com/dominikh/go-tools/tree/master/stylecheck"),
 
 		linter.NewConfig(golinters.Gosec{}).
 			WithTypeInfo().
@@ -156,7 +161,7 @@ func (Manager) GetAllSupportedLinterConfigs() []*linter.Config {
 			WithPresets(linter.PresetPerformance).
 			WithSpeed(10).
 			WithURL("https://github.com/mdempsky/maligned"),
-		linter.NewConfig(golinters.Megacheck{GosimpleEnabled: true, UnusedEnabled: true, StaticcheckEnabled: true}).
+		linter.NewConfig(golinters.Megacheck{GosimpleEnabled: true, UnusedEnabled: true, StaticcheckEnabled: true, StylecheckEnabled: true}).
 			WithSSA().
 			WithPresets(linter.PresetStyle, linter.PresetBugs, linter.PresetUnused).
 			WithSpeed(1).
@@ -213,6 +218,7 @@ func (Manager) GetAllSupportedLinterConfigs() []*linter.Config {
 		golinters.Megacheck{StaticcheckEnabled: true}.Name(): true,
 		golinters.Megacheck{UnusedEnabled: true}.Name():      true,
 		golinters.Megacheck{GosimpleEnabled: true}.Name():    true,
+		golinters.Megacheck{StylecheckEnabled: true}.Name():  true,
 		golinters.Structcheck{}.Name():                       true,
 		golinters.Varcheck{}.Name():                          true,
 		golinters.Ineffassign{}.Name():                       true,

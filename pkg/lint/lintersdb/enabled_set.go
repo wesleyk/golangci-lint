@@ -84,15 +84,17 @@ func getAllMegacheckSubLinterNames() []string {
 	unusedName := golinters.Megacheck{UnusedEnabled: true}.Name()
 	gosimpleName := golinters.Megacheck{GosimpleEnabled: true}.Name()
 	staticcheckName := golinters.Megacheck{StaticcheckEnabled: true}.Name()
-	return []string{unusedName, gosimpleName, staticcheckName}
+	stylecheckName := golinters.Megacheck{StylecheckEnabled: true}.Name()
+	return []string{unusedName, gosimpleName, staticcheckName, stylecheckName}
 }
 
 func (es EnabledSet) optimizeLintersSet(linters map[string]*linter.Config) {
 	unusedName := golinters.Megacheck{UnusedEnabled: true}.Name()
 	gosimpleName := golinters.Megacheck{GosimpleEnabled: true}.Name()
 	staticcheckName := golinters.Megacheck{StaticcheckEnabled: true}.Name()
-	fullName := golinters.Megacheck{GosimpleEnabled: true, UnusedEnabled: true, StaticcheckEnabled: true}.Name()
-	allNames := []string{unusedName, gosimpleName, staticcheckName, fullName}
+	stylecheckName := golinters.Megacheck{StylecheckEnabled: true}.Name()
+	fullName := golinters.Megacheck{GosimpleEnabled: true, UnusedEnabled: true, StaticcheckEnabled: true, StylecheckEnabled: true}.Name()
+	allNames := []string{unusedName, gosimpleName, staticcheckName, stylecheckName, fullName}
 
 	megacheckCount := 0
 	for _, n := range allNames {
@@ -110,13 +112,15 @@ func (es EnabledSet) optimizeLintersSet(linters map[string]*linter.Config) {
 		UnusedEnabled:      isFullEnabled || linters[unusedName] != nil,
 		GosimpleEnabled:    isFullEnabled || linters[gosimpleName] != nil,
 		StaticcheckEnabled: isFullEnabled || linters[staticcheckName] != nil,
+		StylecheckEnabled:  isFullEnabled || linters[stylecheckName] != nil,
 	}
 
 	for _, n := range allNames {
 		delete(linters, n)
 	}
 
-	lc := *es.m.GetLinterConfig("megacheck")
+	m := es.m.GetLinterConfig("megacheck")
+	lc := *m
 	lc.Linter = mega
 	linters[mega.Name()] = &lc
 }

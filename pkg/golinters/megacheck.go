@@ -2,22 +2,23 @@ package golinters
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
+	"time"
 
-	"github.com/golangci/go-tools/lint"
-	"github.com/golangci/go-tools/lint/lintutil"
-	"github.com/golangci/go-tools/simple"
-	"github.com/golangci/go-tools/staticcheck"
-	"github.com/golangci/go-tools/unused"
-	"github.com/golangci/tools/go/ssa"
-	"golang.org/x/tools/go/loader"
+	"github.com/pkg/errors"
+
+	"honnef.co/go/tools/config"
+	"honnef.co/go/tools/stylecheck"
+
 	"golang.org/x/tools/go/packages"
+	"honnef.co/go/tools/lint"
+	"honnef.co/go/tools/lint/lintutil"
+	"honnef.co/go/tools/simple"
+	"honnef.co/go/tools/staticcheck"
+	"honnef.co/go/tools/unused"
 
-	"github.com/golangci/golangci-lint/pkg/fsutils"
 	"github.com/golangci/golangci-lint/pkg/lint/linter"
-	libpackages "github.com/golangci/golangci-lint/pkg/packages"
 	"github.com/golangci/golangci-lint/pkg/result"
 )
 
@@ -27,6 +28,7 @@ type Megacheck struct {
 	UnusedEnabled      bool
 	GosimpleEnabled    bool
 	StaticcheckEnabled bool
+	StylecheckEnabled  bool
 }
 
 func (m Megacheck) Name() string {
@@ -40,12 +42,15 @@ func (m Megacheck) Name() string {
 	if m.StaticcheckEnabled {
 		names = append(names, "staticcheck")
 	}
+	if m.StylecheckEnabled {
+		names = append(names, "stylecheck")
+	}
 
 	if len(names) == 1 {
 		return names[0] // only one sublinter is enabled
 	}
 
-	if len(names) == 3 {
+	if len(names) == 4 {
 		return megacheckName // all enabled
 	}
 
@@ -57,74 +62,21 @@ func (m Megacheck) Desc() string {
 		"unused":      "Checks Go code for unused constants, variables, functions and types",
 		"gosimple":    "Linter for Go source code that specializes in simplifying a code",
 		"staticcheck": "Staticcheck is a go vet on steroids, applying a ton of static analysis checks",
+		"stylecheck":  "Stylecheck is a replacement for golint",
 		"megacheck":   "3 sub-linters in one: unused, gosimple and staticcheck",
 	}
 
 	return descs[m.Name()]
 }
 
-func prettifyCompilationError(err packages.Error) error {
-	i, _ := TypeCheck{}.parseError(err)
-	if i == nil {
-		return err
-	}
-
-	shortFilename, pathErr := fsutils.ShortestRelPath(i.Pos.Filename, "")
-	if pathErr != nil {
-		return err
-	}
-
-	errText := shortFilename
-	if i.Line() != 0 {
-		errText += fmt.Sprintf(":%d", i.Line())
-	}
-	errText += fmt.Sprintf(": %s", i.Text)
-	return errors.New(errText)
-}
-
-func (m Megacheck) canAnalyze(lintCtx *linter.Context) bool {
-	if len(lintCtx.NotCompilingPackages) == 0 {
-		return true
-	}
-
-	var errPkgs []string
-	var errs []packages.Error
-	for _, p := range lintCtx.NotCompilingPackages {
-		if p.Name == "main" {
-			// megacheck crashes on not compiling packages but main packages
-			// aren't reachable by megacheck: other packages can't depend on them.
-			continue
-		}
-
-		errPkgs = append(errPkgs, p.String())
-		errs = append(errs, libpackages.ExtractErrors(p, lintCtx.ASTCache)...)
-	}
-
-	if len(errPkgs) == 0 { // only main packages do not compile
-		return true
-	}
-
-	warnText := fmt.Sprintf("Can't run megacheck because of compilation errors in packages %s", errPkgs)
-	if len(errs) != 0 {
-		warnText += fmt.Sprintf(": %s", prettifyCompilationError(errs[0]))
-		if len(errs) > 1 {
-			const runCmd = "golangci-lint run --no-config --disable-all -E typecheck"
-			warnText += fmt.Sprintf(" and %d more errors: run `%s` to see all errors", len(errs)-1, runCmd)
-		}
-	}
-	lintCtx.Log.Warnf("%s", warnText)
-
-	// megacheck crashes if there are not compiling packages
-	return false
-}
-
 func (m Megacheck) Run(ctx context.Context, lintCtx *linter.Context) ([]result.Issue, error) {
-	if !m.canAnalyze(lintCtx) {
-		return nil, nil
+	issues, err := runMegacheck(lintCtx.Packages,
+		m.StaticcheckEnabled, m.GosimpleEnabled, m.UnusedEnabled, m.StylecheckEnabled,
+		lintCtx.Settings().Unused.CheckExported)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to run megacheck")
 	}
 
-	issues := runMegacheck(lintCtx.Program, lintCtx.MegacheckSSAProgram, lintCtx.LoaderConfig,
-		m.StaticcheckEnabled, m.GosimpleEnabled, m.UnusedEnabled, lintCtx.Settings().Unused.CheckExported)
 	if len(issues) == 0 {
 		return nil, nil
 	}
@@ -140,34 +92,88 @@ func (m Megacheck) Run(ctx context.Context, lintCtx *linter.Context) ([]result.I
 	return res, nil
 }
 
-func runMegacheck(program *loader.Program, ssaProg *ssa.Program, conf *loader.Config,
-	enableStaticcheck, enableGosimple, enableUnused, checkExportedUnused bool) []lint.Problem {
+func runMegacheck(workingPkgs []*packages.Package,
+	enableStaticcheck, enableGosimple, enableUnused, enableStylecheck, checkExportedUnused bool) ([]lint.Problem, error) {
 
-	var checkers []lintutil.CheckerConfig
-
-	if enableStaticcheck {
-		sac := staticcheck.NewChecker()
-		checkers = append(checkers, lintutil.CheckerConfig{
-			Checker: sac,
-		})
-	}
+	var checkers []lint.Checker
 
 	if enableGosimple {
-		sc := simple.NewChecker()
-		checkers = append(checkers, lintutil.CheckerConfig{
-			Checker: sc,
-		})
+		checkers = append(checkers, simple.NewChecker())
 	}
-
+	if enableStaticcheck {
+		checkers = append(checkers, staticcheck.NewChecker())
+	}
+	if enableStylecheck {
+		checkers = append(checkers, stylecheck.NewChecker())
+	}
 	if enableUnused {
 		uc := unused.NewChecker(unused.CheckAll)
-		uc.WholeProgram = checkExportedUnused
 		uc.ConsiderReflection = true
-		checkers = append(checkers, lintutil.CheckerConfig{
-			Checker: unused.NewLintChecker(uc),
-		})
+		uc.WholeProgram = checkExportedUnused
+		checkers = append(checkers, unused.NewLintChecker(uc))
 	}
 
-	fs := lintutil.FlagSet(megacheckName)
-	return lintutil.ProcessFlagSet(checkers, fs, program, ssaProg, conf)
+	if len(checkers) == 0 {
+		return nil, nil
+	}
+
+	cfg := config.Config{}
+	opts := &lintutil.Options{
+		// TODO: get current go version, but now it doesn't matter,
+		// may be needed after next updates of megacheck
+		GoVersion: 11,
+
+		Config: cfg,
+		// TODO: support Ignores option
+	}
+
+	return runMegacheckCheckers(checkers, opts, workingPkgs)
+}
+
+// parseIgnore is a copy from megacheck code just to not fork megacheck
+func parseIgnore(s string) ([]lint.Ignore, error) {
+	var out []lint.Ignore
+	if len(s) == 0 {
+		return nil, nil
+	}
+	for _, part := range strings.Fields(s) {
+		p := strings.Split(part, ":")
+		if len(p) != 2 {
+			return nil, errors.New("malformed ignore string")
+		}
+		path := p[0]
+		checks := strings.Split(p[1], ",")
+		out = append(out, &lint.GlobIgnore{Pattern: path, Checks: checks})
+	}
+	return out, nil
+}
+
+func runMegacheckCheckers(cs []lint.Checker, opt *lintutil.Options, workingPkgs []*packages.Package) ([]lint.Problem, error) {
+	stats := lint.PerfStats{
+		CheckerInits: map[string]time.Duration{},
+	}
+
+	ignores, err := parseIgnore(opt.Ignores)
+	if err != nil {
+		return nil, err
+	}
+
+	var problems []lint.Problem
+	if len(workingPkgs) == 0 {
+		return problems, nil
+	}
+
+	l := &lint.Linter{
+		Checkers:      cs,
+		Ignores:       ignores,
+		GoVersion:     opt.GoVersion,
+		ReturnIgnored: opt.ReturnIgnored,
+		Config:        opt.Config,
+
+		MaxConcurrentJobs: opt.MaxConcurrentJobs,
+		PrintStats:        opt.PrintStats,
+	}
+	problems = append(problems, l.Lint(workingPkgs, &stats)...)
+
+	return problems, nil
 }
